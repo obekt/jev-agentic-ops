@@ -99,6 +99,18 @@ def logrec(rec):
     with open(LOG, "a") as f:
         f.write(json.dumps(rec, default=str) + "\n")
 
+def mission_ready(sc):
+    """True if we carry enough of every active mission's deliver item."""
+    cargo = {c["item_id"]: c.get("quantity", 0) for c in sc.get("cargo", [])}
+    missions = sc.get("missions", {}).get("active", []) or []
+    for m in missions:
+        for o in m.get("objectives", []):
+            if o.get("type") == "deliver_item" or o.get("item_id"):
+                have = int(cargo.get(o.get("item_id"), 0)) + int(o.get("current", 0) or 0)
+                if o.get("required") and have < int(o["required"]):
+                    return False
+    return bool(missions)
+
 def pick_action(sc, ans):
     """Map Jev answers to a concrete action with confidence gate."""
     strat = ans["answers"]["strategy"]
@@ -108,6 +120,9 @@ def pick_action(sc, ans):
     choice = strat["choice"]
     if threat > 0.7:
         return "flee_to_home", f"threat noul {threat:.2f} > 0.7", conf
+    # CODE override: goods in hold -> deliver, regardless of market-leaning strategy
+    if mission_ready(sc) and choice in ("acquire_goods_then_deliver", "deliver_mission", "freight_boarding"):
+        return "jump_mission", "cargo satisfies mission -> deliver", conf
     if conf < CONF_BAR:
         # fallback heuristic in code: mine if POI fits, else head home
         if mine_fit > 0.5:
@@ -134,26 +149,56 @@ def gated(mutate_fn):
     json.dump({"last": time.time()}, open(GATE, "w"))
     return res
 
+def ensure_docked(target_base=None):
+    """Travel to the system's station POI if needed, then dock. Returns fresh state."""
+    sc = gather()
+    loc = sc["location"]
+    if loc.get("docked_at"):
+        return sc
+    sysid = loc["system_id"]
+    s2 = api.structured(api.query("spacemolt", "get_system", {"system_id": sysid}))
+    if isinstance(s2, str):
+        s2 = json.loads(s2)
+    stations = [p for p in s2["system"]["pois"] if p.get("type") == "station"]
+    if not stations:
+        raise RuntimeError(f"no station POI in {sysid}")
+    tgt = target_base or stations[0]["id"]
+    if loc["poi_id"] != tgt:
+        gated(lambda: api.mutate("spacemolt", "travel", {"target_poi": tgt}))
+        time.sleep(12)
+    gated(lambda: api.mutate("spacemolt", "dock", {}))
+    return gather()
+
 def arrive_actions(sc, action):
-    """We are already at the target system — dock, trade, complete."""
-    sc2 = sc
-    dock_res = gated(lambda: api.mutate("spacemolt", "dock", {}))
-    out = {"docked": str(api.structured(dock_res))[:120]}
-    missions = sc.get("missions", {}).get("active", []) or []
-    if action == "jump_market":
-        # buy the mission goods + top up fuel
+    """We are at the target system — travel to station, dock, trade, complete."""
+    if action == "jump_mission":
+        sc = ensure_docked("traders_rest_resort_station")
+        missions = sc.get("missions", {}).get("active", []) or []
+        out = {"docked": True}
         if missions:
-            obj = missions[0]["objectives"][0]
-            need = int(obj.get("required", 0)) - int(obj.get("current", 0))
-            if need > 0:
-                buy = gated(lambda: api.mutate("spacemolt", "buy", {"item_id": obj["item_id"], "quantity": need}))
-                out["buy"] = str(api.structured(buy))[:150]
-        ref = gated(lambda: api.mutate("spacemolt", "refuel", {"item_id": "fuel_cell", "quantity": 60}))
-        out["refuel"] = str(api.structured(ref))[:150]
-    if action == "jump_mission" and missions:
-        mid = missions[0].get("mission_id")
-        cm = gated(lambda: api.mutate("spacemolt", "complete_mission", {"mission_id": mid}))
-        out["complete"] = str(api.structured(cm))[:200]
+            mid = missions[0].get("mission_id")
+            cm = gated(lambda: api.mutate("spacemolt", "complete_mission", {"mission_id": mid}))
+            out["complete"] = str(api.structured(cm))[:250]
+        return out
+    sc = ensure_docked()
+    out = {"docked": True}
+    missions = sc.get("missions", {}).get("active", []) or []
+    if missions:
+        obj = missions[0]["objectives"][0]
+        need = int(obj.get("required", 0)) - int(obj.get("current", 0))
+        cargo = {c["item_id"]: c.get("quantity", 0) for c in sc.get("cargo", [])}
+        need = max(0, need - cargo.get(obj["item_id"], 0))
+        if need > 0:
+            try:
+                buy = gated(lambda: api.mutate("spacemolt_market", "create_buy_order",
+                                             {"item_id": obj["item_id"], "quantity": need, "price_each": 120}))
+                out["buy_order"] = str(api.structured(buy))[:200]
+            except Exception as e:
+                out["buy_order_err"] = str(e)[:150]
+        else:
+            out["buy"] = "already carrying mission goods"
+    ref = gated(lambda: api.mutate("spacemolt", "refuel", {"item_id": "fuel_cell", "quantity": 80}))
+    out["refuel"] = str(api.structured(ref))[:200]
     return out
 
 def execute(action, sc):
