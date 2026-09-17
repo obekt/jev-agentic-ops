@@ -1,5 +1,15 @@
 # JeV Agentic Ops — System One decision layers for agent fleets
 
+> **Status: PRIVATE LAB, not a product.** This is day-early experimentation
+> (started 2026-09-17), not a mature framework. The public posts about this
+> pattern describe our live experiments; this repo stays private until the
+> evidence base is large enough to be worth standing behind:
+> - A/B corpus grown from n=6 to 100+ tasks across ≥2 reasoning models
+> - Multiple weeks of production logs (pilot decisions, gate verdicts, fallback rates)
+> - Results independently reproducible from the shipped harness
+>
+> Until then: everything here is a working draft.
+
 A pattern and reference implementation for wiring [TypeSafe's Jev](https://docs.typesafe.ai/introduction)
 (a "System One" model: typed questions in, probabilistic decisions out — no text
 generation, no parsing) into **autonomous agent operations**.
