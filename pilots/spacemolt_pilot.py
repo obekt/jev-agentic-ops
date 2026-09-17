@@ -164,10 +164,53 @@ def ensure_docked(target_base=None):
         raise RuntimeError(f"no station POI in {sysid}")
     tgt = target_base or stations[0]["id"]
     if loc["poi_id"] != tgt:
-        gated(lambda: api.mutate("spacemolt", "travel", {"target_poi": tgt}))
-        time.sleep(12)
-    gated(lambda: api.mutate("spacemolt", "dock", {}))
+        try:
+            gated(lambda: api.mutate("spacemolt", "travel", {"target_poi": tgt}))
+        except Exception as e:
+            if "already" not in str(e):
+                raise
+        time.sleep(15)  # in-system travel takes ticks
+    try:
+        gated(lambda: api.mutate("spacemolt", "dock", {}))
+    except Exception as e:
+        if "already_docked" not in str(e):
+            raise
     return gather()
+
+def accept_board_mission(sc):
+    """Docked with no mission: Jev picks the best deliver/sell contract. Returns result dict."""
+    sc = ensure_docked()
+    board = api.structured(api.query("spacemolt", "get_missions"))
+    if isinstance(board, str):
+        board = json.loads(board)
+    cands = {}
+    for m in board.get("missions", []):
+        o = (m.get("objectives") or [{}])[0]
+        rw = (m.get("rewards") or {}).get("credits") or 0
+        # CODE feasibility filter: non-combat hauler, no tow rig -> deliver/sell_item only
+        if o.get("type") in ("deliver_item", "sell_item") and rw > 0 and o.get("system_id"):
+            cands[m["mission_id"]] = (f"{m['type']}, {o.get('quantity')} units {o.get('item_name')}, "
+                                     f"dest {o.get('system_name')}, diff {m.get('difficulty')}, reward {rw}cr")
+    if not cands:
+        return {"noop": "no feasible paid deliver contracts on board"}
+    state = {
+        "ship": "Consortium cargo hauler: cargo 145, mining laser, NO tow rig, NO combat weapons, 2 marines",
+        "history": "51 ships lost historically, mostly to pirates; strong trading record 406 missions completed",
+        "board": cands,
+    }
+    resp = jev(state, {"pick": {"type": "choice",
+                               "instructions": "accept exactly one contract that maximizes expected value for this ship (avoid what the ship cannot do)",
+                               "criteria": cands}})
+    a = resp["answers"]["pick"]
+    pick = a.get("choice")
+    if pick not in cands or (a.get("confidence") or 0) < 0.45:
+        pick = max(cands, key=lambda k: int(cands[k].rsplit("reward ", 1)[1].split("cr")[0]))
+        src = "fallback_highest_credits"
+    else:
+        src = f"jev_conf_{a['confidence']:.2f}"
+    r = gated(lambda: api.mutate("spacemolt", "accept_mission", {"mission_id": pick}))
+    logrec({"event": "accept", "mission_id": pick, "why": src, "desc": cands[pick]})
+    return {"accepted": pick, "why": src, "desc": cands[pick], "result": str(api.structured(r))[:150]}
 
 def arrive_actions(sc, action):
     """We are at the target system — travel to station, dock, trade, complete."""
@@ -183,20 +226,23 @@ def arrive_actions(sc, action):
     sc = ensure_docked()
     out = {"docked": True}
     missions = sc.get("missions", {}).get("active", []) or []
-    if missions:
-        obj = missions[0]["objectives"][0]
-        need = int(obj.get("required", 0)) - int(obj.get("current", 0))
-        cargo = {c["item_id"]: c.get("quantity", 0) for c in sc.get("cargo", [])}
-        need = max(0, need - cargo.get(obj["item_id"], 0))
-        if need > 0:
-            try:
-                buy = gated(lambda: api.mutate("spacemolt_market", "create_buy_order",
-                                             {"item_id": obj["item_id"], "quantity": need, "price_each": 120}))
-                out["buy_order"] = str(api.structured(buy))[:200]
-            except Exception as e:
-                out["buy_order_err"] = str(e)[:150]
-        else:
-            out["buy"] = "already carrying mission goods"
+    if not missions:
+        # Loop closer: pick a fresh contract from the station board
+        out.update(accept_board_mission(sc))
+        return out
+    obj = missions[0]["objectives"][0]
+    need = int(obj.get("required", 0)) - int(obj.get("current", 0))
+    cargo = {c["item_id"]: c.get("quantity", 0) for c in sc.get("cargo", [])}
+    need = max(0, need - cargo.get(obj["item_id"], 0))
+    if need > 0:
+        try:
+            buy = gated(lambda: api.mutate("spacemolt_market", "create_buy_order",
+                                         {"item_id": obj["item_id"], "quantity": need, "price_each": 120}))
+            out["buy_order"] = str(api.structured(buy))[:200]
+        except Exception as e:
+            out["buy_order_err"] = str(e)[:150]
+    else:
+        out["buy"] = "already carrying mission goods"
     ref = gated(lambda: api.mutate("spacemolt", "refuel", {"item_id": "fuel_cell", "quantity": 80}))
     out["refuel"] = str(api.structured(ref))[:200]
     return out
@@ -213,9 +259,15 @@ def execute(action, sc):
         nxt = home["route"][1]["system_id"]
         return gated(lambda: api.mutate("spacemolt", "jump", {"target_system": nxt}))
     if action == "jump_mission":
-        if sysid == "traders_rest":
+        missions = sc.get("missions", {}).get("active", []) or []
+        if not missions:
+            return {"noop": "no active mission"}
+        dest = missions[0]["objectives"][0].get("system_id")
+        if not dest:
+            return {"noop": "mission has no system destination"}
+        if sc["location"]["system_id"] == dest:
             return arrive_actions(sc, action)
-        tgt = json.loads(json.dumps(api.structured(api.query("spacemolt", "find_route", {"target_system": "traders_rest"}))))
+        tgt = json.loads(json.dumps(api.structured(api.query("spacemolt", "find_route", {"target_system": dest}))))
         mnx = tgt["route"][1]["system_id"]
         return gated(lambda: api.mutate("spacemolt", "jump", {"target_system": mnx}))
     return {"error": f"unknown action {action}"}
