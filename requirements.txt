@@ -1,0 +1,2 @@
+# stdlib only — typesafe-sdk optional for typed clients
+typesafe-sdk>=0.1
