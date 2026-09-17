@@ -25,7 +25,7 @@ KEY = json.load(open(os.path.expanduser("~/.config/typesafe/credentials.json")))
 TS_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 LOG = os.path.join(HERE, "jev_pilot_log.jsonl")
 STOP = os.path.join(HERE, "jev_pilot.stop")
-CONF_BAR = 0.45  # confidence below this => code fallback, not Jev
+CONF_BAR = 0.6   # tuned by A/B harness 2026-09-17: mid-band escalates to reasoning LLM
 
 def jev(state, questions, timeout=30):
     req = urllib.request.Request(TS_ENDPOINT, data=json.dumps({
