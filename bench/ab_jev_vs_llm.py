@@ -16,8 +16,8 @@ from jevlib import Jev
 
 # --- engine A: reasoning LLM over OpenAI-compatible endpoint -------------
 LLM_BASE = "https://chat.obekt.com/v1"
-LLM_MODEL = os.environ.get("AB_LLM_MODEL", "qwen3.8-27b")
-LLM_KEY = os.environ.get("HERMES_CUSTOM_CHAT_OBEKT_COM_API_KEY", "")
+LLM_MODEL = os.environ.get("AB_LLM_MODEL", "halogen-qwen3.8-flash-next")
+LLM_KEY = os.environ.get("AB_LLM_KEY", os.environ.get("HERMES_CUSTOM_CHAT_OBEKT_COM_API_KEY", ""))
 
 def llm_judge(state, question_text, options=None, scale=None):
     """Forced structured output from a reasoning LLM."""

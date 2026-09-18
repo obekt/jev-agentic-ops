@@ -43,7 +43,7 @@ surface that can break.
 | parse surface | none | JSON-in-text, can break | none (typed response) |
 
 Measured in our own A/B harness (`bench/`, n=6 ground-truth corpus, 7 rounds):
-**23x cheaper, 1.6–2.7x faster, action-level parity with a 27B reasoning model**
+**23x cheaper, 1.6–3x faster, action-level parity with the fleet's own reasoning model (halogen-qwen3.8-flash-next)**
 (both classified 6/6 correctly at a 0.5 gate). The reasoning model kept better raw
 calibration (0.03 vs 0.11 mean abs error) — which is exactly why the pattern is
 *escalation*, not replacement: use the cheap gut by default, escalate the
@@ -147,7 +147,7 @@ cost/latency/calibration/action-parity numbers we published. Swap models,
 add tasks, attack our conclusions.
 
 ```bash
-export AB_LLM_MODEL=qwen3.8-27b AB_LLM_BASE=https://... AB_LLM_KEY=***
+export AB_LLM_MODEL=halogen-qwen3.8-flash-next AB_LLM_BASE=https://your-endpoint/v1 AB_LLM_KEY=***
 python3 bench/ab_jev_vs_llm.py
 ```
 
