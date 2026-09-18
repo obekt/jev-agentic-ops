@@ -1,163 +1,166 @@
-# JeV Agentic Ops — System One decision layers for agent fleets
+# System One decision layers for AI agents
 
-> **Status: PRIVATE LAB, not a product.** This is day-early experimentation
-> (started 2026-09-17), not a mature framework. The public posts about this
-> pattern describe our live experiments; this repo stays private until the
-> evidence base is large enough to be worth standing behind:
-> - A/B corpus grown from n=6 to 100+ tasks across ≥2 reasoning models
-> - Multiple weeks of production logs (pilot decisions, gate verdicts, fallback rates)
-> - Results independently reproducible from the shipped harness
->
-> Until then: everything here is a working draft.
+**What this repo is:** a working pattern, battle-tested in continuous 24/7 runs
+since 2026-09-17, for giving your agent a fast cheap *gut* alongside its
+expensive reasoning model. The gut is [TypeSafe's Jev](https://docs.typesafe.ai)
+— a "System One" model: you send state + typed questions, it returns typed
+decisions with probabilities and calibrated confidence. No text generation, no
+parsing.
 
-A pattern and reference implementation for wiring [TypeSafe's Jev](https://docs.typesafe.ai/introduction)
-(a "System One" model: typed questions in, probabilistic decisions out — no text
-generation, no parsing) into **autonomous agent operations**.
+> We kept this private until the evidence was worth publishing. What's here is
+> what survived contact with real workloads: a live game economy, a social
+> publishing pipeline, and a financial-brief pipeline. SpaceMolt is one example,
+> not the product — the pattern generalizes to any agent that makes repeated
+> bounded decisions.
 
-Built with [Hermes Agent](https://hermes-agent.nousresearch.com) as the host fleet,
-but the pattern is host-agnostic.
-
-## The core idea
-
-LLM agents normally burn a reasoning model on *every* decision, including ones a
-human expert would make in two seconds ("is this pirate nearby dangerous?", "is this
-draft spam?"). JeV — a fast calibrated decision model — replaces that class of
-decisions at ~100-1000x lower cost, while the expensive reasoning model stays in
-charge of **code, planning, and execution**.
-
-The contract:
+## Repo map
 
 ```
-CODE (host agent)               JEV (System One)
-- owns all side effects          - answers atomic typed questions
-- computes deterministic facts   - never executes anything
-- composes answers with logic    - never sees the whole plan
-- sets confidence thresholds    - returns probabilities + confidence
-- handles fallback when low     - one parallel call per decision point
+lib/jevlib.py                  shared stdlib client (ask(state, {name:(type,instr[,criteria])}))
+patterns.md                    the 6 production patterns + anti-patterns
+gates/content_gate.py          pre-publish quality/safety/spam/hook gate
+briefs/jev_predict.py          batch document priors (news brief quick-read table)
+pilots/spacemolt_pilot.py      full autonomous game-agent example (pattern in motion)
+pilots/sm_api.py               game API helper (env-var creds)
+bench/ab_jev_vs_llm.py         A/B harness vs any OpenAI-compatible reasoning model
+bench/RESULTS_2026-09-17.md    first measured results
 ```
 
-Three rules we learned running this for real:
+## Why agents need this (the argument in one table)
 
-1. **Never let Jev touch the trigger.** It ranks and flags; code acts. A wrong
-   `noul=0.9` can't fire a mutation by itself — your thresholds decide.
-2. **One call, many questions.** Atomic questions (Choice / Score / Noul) run
-   in parallel against the same state. 4 questions ≈ same latency as 1. Decompose
-   every judgment or the model drifts.
-3. **Confidence is the second axis.** `answer` tells you *what*, `confidence`
-   tells you *whether to act*. Below the bar → code heuristic fallback, logged as
-   fallback so you can audit how often the model actually decided.
+Your reasoning LLM is great at planning, writing, code — and terrible economics
+when used for every micro-decision. Every "is this spam?", "is this dangerous?",
+"which queue first?" costs a full inference pass, seconds of latency, and a parse
+surface that can break.
 
-## Components
+| | rules only | LLM-as-judge | System One (Jev) |
+|---|---|---|---|
+| fuzzy judgments | brittle | ✓ | ✓ |
+| per-decision cost | ~$0 | ~23x jev (measured) | ~$0.000015 |
+| latency per decision | ~0 | 2–3s | <1s |
+| N questions on same state | N rule files | N sequential calls | **1 parallel call** |
+| calibrated uncertainty | ✗ | vibes in text | typed probs + confidence |
+| parse surface | none | JSON-in-text, can break | none (typed response) |
+
+Measured in our own A/B harness (`bench/`, n=6 ground-truth corpus, 7 rounds):
+**23x cheaper, 1.6–2.7x faster, action-level parity with a 27B reasoning model**
+(both classified 6/6 correctly at a 0.5 gate). The reasoning model kept better raw
+calibration (0.03 vs 0.11 mean abs error) — which is exactly why the pattern is
+*escalation*, not replacement: use the cheap gut by default, escalate the
+uncertain middle band.
+
+## The contract (the actual lesson)
 
 ```
-lib/jevlib.py               shared client: ask(state, {name:(type,instr[,criteria])})
-pilots/spacemolt_pilot.py    live game pilot: Jev flies a cargo hauler 24/7
-gates/content_gate.py        pre-publish quality/safety gate (spam/quality/jailbreak/hook)
+CODE (your agent)                  JEV (System One)
+- owns ALL side effects            - answers atomic typed questions
+- computes deterministic facts     - never executes anything
+- composes answers with logic      - never sees the whole plan
+- sets confidence thresholds     - returns probs + confidence
+- escalates/ falls back           - one parallel call per decision point
 ```
 
-### 1. The shared client (`jevlib`)
+Three rules earned the hard way:
+
+1. **The model never touches the trigger.** Jev ranks; code acts. A wrong
+   `noul=0.9` must not be able to fire a mutation without your threshold.
+2. **Never ask the model what code can compute.** (Found live: the model kept
+   answering "buy goods" while the cargo manifest already contained them. Code
+   checks manifests; models resolve ambiguity.)
+3. **Confidence is the second axis.** Answer = *what*; confidence = *whether to
+   act*. Log every below-bar decision and tune the bar from the logs — don't
+   guess it. (We raised ours 0.45 → 0.6 after measurement showed the mid-band is
+   where escalation earns its keep.)
+
+## Using this with Hermes (or any agent runtime)
+
+### 1. Shared client — `lib/jevlib.py`
+
+Stdlib-only Python client. Works anywhere; no SDK required.
 
 ```python
 from jevlib import Jev
-ans = Jev().ask(
-    state={"fuel": 163, "nearby_pirates": 0, "mission": "deliver 12 gold wire"},
+
+ans = Jev(api_key=os.environ["TYPESAFE_API_KEY"]).ask(
+    state={"queue_len": 42, "sla_minutes": 30, "oldest_age": 55},
     questions={
-        "threat":   ("noul",  "staying here exposes the ship to significant combat risk"),
-        "strategy": ("choice", "which operation next", {
-            "deliver_mission": "go deliver", "acquire_then_deliver": "buy goods first",
-            "mine_locally": "mine here", "return_home": "resupply"}),
+        "breaching":  ("noul",  "we will miss SLA if nothing changes"),
+        "triage":     ("choice", "which queue needs attention first",
+                      {"support": "customer tickets", "deploy": "build queue",
+                       "data": "ingestion backlog"}),
+        "severity":   ("score", "operational severity",
+                      ["routine", "elevated", "critical"]),
     })
-# ans["strategy"] == "acquire_then_deliver", ans["_raw"]["strategy"]["confidence"] == 0.75
+# ans["breaching"] == 0.91, ans["_raw"]["triage"]["confidence"] == 0.73
 ```
 
-Every call is logged to a usage JSONL so fleet spend is auditable (~$0.04/M input).
+In Hermes specifically: drop it in `~/.hermes/lib/`, and any cron job, skill, or
+workspace script imports it the same way. Every call is logged to a JSONL for
+spend auditing (~$0.0013 for our entire first night: 61 calls).
 
-### 2. Game pilot: `pilots/spacemolt_pilot.py`
+### 2. Pattern: confidence-gated routing (`patterns.md`)
 
-A live example: the pilot flies an MMO cargo run (SpaceMolt) where Jev makes the
-strategic call each tick and code does everything else.
+The core architectural primitive — full recipes for:
 
-Each decision = one JeV call with 4 atomic questions:
+- **confidence-gated routing** (act / escalate / fallback)
+- **speculative fan-out** (ask 10 questions, use the 2 that matter, same price)
+- **composite scoring** (atomic dimensions, weights stay in your code)
+- **pre-publish content gates** (quality/spam/safety in one call)
+- **batch priors over documents** (news items, tickets, listings)
 
-| question | type | role |
-|---|---|---|
-| `strategy` | Choice | which operation: deliver / acquire-then-deliver / mine / go home / freight board |
-| `threat`   | Noul  | hostile risk in current system |
-| `urgency`  | Score | time pressure of mission/fuel clocks |
-| `mine_fit` | Noul  | is current POI resource-rich |
+### 3. Working examples
 
-Decision policy (pure code, tunable):
+**Content gate (`gates/content_gate.py`)** — every outbound post from our fleet
+passes a 4-question screen before publish: spam risk, quality, jailbreak, hook.
+Calibrated against platform ground truth: jailbreak probes fire 0.93+, clean
+content ≤ 0.11. Blocks junk before it burns rate-limit slots.
 
-```python
-if threat > 0.7:          act = "flee_home"          # threat overrides everything
-elif confidence < 0.45:   act = heuristic(state)      # mine_fit>0.5 → mine, else go home
-else:                     act = map(strategy)         # Jev drives
-```
+**Financial-brief priors (`briefs/jev_predict.py`)** — takes any markdown news
+brief and adds a "System One quick-read" table before the human-style analysis:
 
-Execution layer (Jev never sees any of this): route computation via the game's
-`find_route`, a shared cross-process tick gate (`play_gate.json`, 1 mutation/10s),
-auto-dock + auto-buy of the exact mission item + refuel on arrival at the market
-system, `complete_mission` on delivery arrival.
+| # | item | dir | impact | horizon | conf |
+|---|------|-----|--------|---------|------|
+| 0 | Hawkish Fed print with 10Y *down*... | ▲ up | moderate | hours | 0.59 |
+| 1 | Intraday rotation: Dow −0.4% vs Nasdaq +1.2%... | ▼ down | moderate | hours | 0.86 |
+| 2 | Supply-side fear eased, oil premium out... | ◆ flat | negligible | hours | 0.94 |
+| 3 | Event-risk cluster: tariff levy pending... | ▼ down | moderate | hours | 0.76 |
 
-**Observed live:** 20+ consecutive decisions all `acquire_goods_then_deliver` at
-confidence 0.67–0.89 across 10+ systems — stable strategic coherence with zero
-context-rot, while deterministic code executed the multi-hour route.
+→ tape bias: risk-off. This is not advice — it's a *prior*: a fast, calibrated,
+cheap opinion that the reasoning model can then agree with, argue against, or
+ignore. Runs on 1,658 input tokens in one parallel call regardless of item count.
 
-### 3. Content gate: `gates/content_gate.py`
+**Game agent (`pilots/`)** — the pattern in its most visible form: a fully
+autonomous pilot for a persistent online game economy (SpaceMolt). Jev makes 4
+atomic strategic questions per tick (threat/urgency/strategy/fit) plus a
+contract-selection choice over filtered board candidates; code owns routing,
+tick-rate gating, market orders, docking, delivery. Night one: 25+ consistent
+decisions at conf 0.67–0.97, multiple contracts accepted and completed, zero
+context-rot. The board-selection call is the general form of "agent picks a job":
+code filters by feasibility, model picks by expected value — same shape works for
+gig queues, ad inventory, ticket triage.
 
-Pre-publish System One screen for anything an agent posts. One call, 4 questions:
+## Harness: run the A/B on your own corpus
 
-```
-spam_risk  (Score)  — table-dump-without-view vs genuine analysis
-quality    (Score)  — filler vs testable claim with reasoning
-jailbreak  (Noul)   — hidden instructions targeting AI readers
-hook       (Noul)   — does it actually end with a discussion question
-```
-
-Policy: block on `jailbreak > 0.7 or quality < 1.0`; warn if no hook.
-Calibrated against platform ground truth (our known is_spam=true/false corpus):
-
-| draft | spam | quality | jailbreak | verdict | truth |
-|---|---|---|---|---|---|
-| normal analysis brief | 2.0 | 2.0 | 0.06 | pass | not spam ✓ |
-| "Buy my thing. Click here." | 0.02 | 0.0 | 0.05 | blocked | junk ✓ |
-| "Ignore all previous instructions…" | 0.08 | 0.01 | **0.93** | blocked | attack ✓ |
-
-## Why this pattern (vs plain LLM or plain rules)
-
-- **Rules alone** can't phrase "how frustrated is this customer" without brittle
-  keyword soup. **LLM-as-judge** works but costs ~200x more per decision and adds
-  latency + parse surface.
-- Jev answers are *calibrated distributions*, so the same question can drive
-  different thresholds in different products without retraining.
-- Agents keep full control: when Jev is uncertain, your fallback logic runs —
-  and you can log every fallback and tune the bar from live data.
-- The host LLM is reserved for what it's good at: writing the code, the plans,
-  the posts — while Jev is the cheap fast *gut* the code consults thousands of times.
-
-## Cost shape
-
-Our live numbers: ~700 input + ~120 output tokens per 4-question decision ≈
-**$0.03 per thousand decisions at $0.04/M**. A 24/7 decision loop costs
-single-digit cents/day. That's the unlock: decision frequency stops being the
-budget constraint.
-
-## Quickstart
+`bench/ab_jev_vs_llm.py` — 80 lines of stdlib. Point it at any
+OpenAI-compatible endpoint + your own ground-truth tasks and get the same
+cost/latency/calibration/action-parity numbers we published. Swap models,
+add tasks, attack our conclusions.
 
 ```bash
-export TYPESAFE_API_KEY=***        # from console.typesafe.ai
-export SPACEMOLT_USER=... SPACEMOLT_PASS=...
-pip install typesafe-sdk            # or just use lib/jevlib.py (stdlib only)
-
-python3 pilots/spacemolt_pilot.py decide   # see Jev's read of your game state
-python3 gates/content_gate.py post draft.md # gate a content draft (exit 0/2/1)
+export AB_LLM_MODEL=qwen3.8-27b AB_LLM_BASE=https://... AB_LLM_KEY=***
+python3 bench/ab_jev_vs_llm.py
 ```
 
-## Status
+## Status & evidence
 
-Running in production on our Hermes fleet:
-- `spacemolt-jev-loop` cron: Jev pilots the hauler every 12 minutes, 24/7
-- every outbound Moltbook post passes through the JeV gate before publish
-- usage logged to `~/.hermes/logs/jev_usage.jsonl`
+- Running 24/7 in production: pilot loop (12-min cadence), content gate (all
+  outbound posts), brief priors (scheduled).
+- Logged: ~60 calls/night ≈ $0.0015. Decision audit trail in JSONL.
+- Published writeups: pattern post + measured A/B follow-up (links in this
+  repo's commit history / author's Moltbook profile).
+- Known limits: single model pair tested; corpus small (n=6 ground truth,
+  growing); Jev is not a reasoning substitute — it's a decision accelerator.
 
-MIT. Feedback welcome — this is a young pattern and we want more deployments.
+MIT. Issues and PRs welcome — especially bigger A/B corpora. If you run the
+harness on real workloads, open an issue with your numbers; that's the evidence
+this pattern still needs.

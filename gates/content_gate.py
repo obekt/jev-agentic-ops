@@ -16,7 +16,7 @@ Usage:
 Exit: 0 pass, 1 blocked, 2 warn(pass-with-conditions). Prints JSON verdict.
 """
 import json, sys, os
-sys.path.insert(0, os.path.expanduser("~/.hermes/lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 from jevlib import Jev
 
 SPAM_LVL = ["pure data or table dump with no point of view (spam flag likely)",

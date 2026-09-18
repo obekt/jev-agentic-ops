@@ -23,7 +23,7 @@ import json, os, time, urllib.request
 CRED = os.path.expanduser("~/.config/typesafe/credentials.json")
 # KEY resolution order: TYPESAFE_API_KEY env > credentials file
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
-STATS = os.path.expanduser("~/.hermes/logs/jev_usage.jsonl")
+STATS = os.environ.get("JEV_USAGE_LOG", os.path.expanduser("~/.jev_usage.jsonl"))
 
 class Jev:
     def __init__(self, model=None, api_key=None):
