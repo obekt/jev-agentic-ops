@@ -21,6 +21,7 @@ patterns.md                    the 6 production patterns + anti-patterns
 gates/content_gate.py          pre-publish quality/safety/spam/hook gate
 briefs/jev_predict.py          batch document priors (news brief quick-read table)
 pilots/spacemolt_pilot.py      full autonomous game-agent example (pattern in motion)
+pilots/alpaca_trading_pilot.py live brokerage scalper (crypto + stocks, real money)
 pilots/sm_api.py               game API helper (env-var creds)
 bench/ab_jev_vs_llm.py         A/B harness vs any OpenAI-compatible reasoning model
 bench/RESULTS_2026-09-17.md    first measured results
@@ -139,6 +140,36 @@ context-rot. The board-selection call is the general form of "agent picks a job"
 code filters by feasibility, model picks by expected value — same shape works for
 gig queues, ad inventory, ticket triage.
 
+**Trading pilot (`pilots/alpaca_trading_pilot.py`)** — the same contract with
+*real money* on Alpaca (funded ~$64 experiment, live cron every 15 min):
+
+- **Two venues, one decision shape.** Crypto legs: 3× noul (`p_up` in 30 min) +
+  1 choice per cycle, over live snapshot state (spread, day range, minute
+  momentum, pos-off-low). Stock legs: 1 choice over 10 trenders incl. SDS/SQQQ
+  inverse ETFs as the "short the market" proxy (cash account, no margin, no
+  borrow).
+- **Fee wall as the decision boundary.** Taker fees are 0.25%/side on crypto — a
+  0.5% round trip. Measured 5-min σ: BTC 0.13%, ETH 0.16%, SOL 0.22% → only
+  ~1–3% of bars clear the hurdle. This *why* Jev's most valuable output on this
+  workload is a high-confidence `no_trade`. In the first day: ~85% of cycles
+  returned no_trade at conf 0.82–0.88 — and every one of those skipped
+  "trades" saved 0.5%. **The expensive model's job is planning; the cheap gut's
+  job is saying no 85% of the time for $0.00002.**
+- **When it does act, it acts.** First live signal: chose MU over 9 alternatives
+  (conf 0.66 cleared a 0.65 bar), position went +2.2% same day. Small sample —
+  the point is the loop works end to end: decide → gate → order → manage → exit.
+- **Where System One is NOT enough (found live, now code rules):** market
+  mechanics beat judgment. IOC orders rejected after hours (422); T+2
+  settlement means the real constraint is settled cash, not intent; "no
+  overnight hold" must be a deterministic EOD rule in code, because a decision
+  model asked at 18:55 will happily carry a scalp home. Deterministic facts stay
+  deterministic; the model only resolves the fuzzy middle.
+- **Catalyst injection beats raw tape.** Adding a hand-curated `catalyst.json`
+  (Fed path, ETF flows, squeeze state) to the Jev state changed outputs
+  materially: no_trade conf moved 0.65 ↔ 0.88 as news context changed. Typed
+  questions over state you *feed it* — garbage in, calibrated garbage out.
+
+
 ## Harness: run the A/B on your own corpus
 
 `bench/ab_jev_vs_llm.py` — 80 lines of stdlib. Point it at any
@@ -154,7 +185,8 @@ python3 bench/ab_jev_vs_llm.py
 ## Status & evidence
 
 - Running 24/7 in production: pilot loop (12-min cadence), content gate (all
-  outbound posts), brief priors (scheduled).
+  outbound posts), brief priors (scheduled), alpaca trading scalper (15-min
+  cadence, real funds, first realized trade +2.2%).
 - Logged: ~60 calls/night ≈ $0.0015. Decision audit trail in JSONL.
 - Published writeups: pattern post + measured A/B follow-up (links in this
   repo's commit history / author's Moltbook profile).
